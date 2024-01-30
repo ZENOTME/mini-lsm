@@ -36,9 +36,21 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 }
 
 impl MemTable {
+    #[cfg(test)]
+    pub fn print_map(&self) {
+        for v in self.map.iter() {
+            println!("{:?} {:?}", v.key(), v.value());
+        }
+    }
+
     /// Create a new mem-table.
-    pub fn create(_id: usize) -> Self {
-        unimplemented!()
+    pub fn create(id: usize) -> Self {
+        Self {
+            map: Arc::new(SkipMap::new()),
+            wal: None,
+            id,
+            approximate_size: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Create a new mem-table with WAL
@@ -68,16 +80,36 @@ impl MemTable {
     }
 
     /// Get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        Some(self.map.get(key)?.value().clone())
     }
 
     /// Put a key-value pair into the mem-table.
     ///
     /// In week 1, day 1, simply put the key-value pair into the skipmap.
     /// In week 2, day 6, also flush the data to WAL.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let len = key.len() + value.len();
+        let value_len = value.len();
+
+        let key = Bytes::copy_from_slice(key);
+        let value = Bytes::copy_from_slice(value);
+        let res = self.map.insert(key, value);
+        if res.is_removed() {
+            // Process the case that the key already exists in the map.
+            let update_len = value_len as i64 - res.value().len() as i64;
+            if update_len > 0 {
+                self.approximate_size
+                    .fetch_add(update_len as usize, std::sync::atomic::Ordering::Relaxed);
+            } else if update_len < 0 {
+                self.approximate_size
+                    .fetch_sub((-update_len) as usize, std::sync::atomic::Ordering::Relaxed);
+            }
+        } else {
+            self.approximate_size
+                .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     pub fn sync_wal(&self) -> Result<()> {
