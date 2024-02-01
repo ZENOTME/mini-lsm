@@ -17,7 +17,16 @@ pub struct LsmIterator {
 
 impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        Ok(Self { inner: iter })
+        let mut res = Self { inner: iter };
+        res.skip_delete_value()?;
+        Ok(res)
+    }
+
+    fn skip_delete_value(&mut self) -> Result<()> {
+        while self.inner.is_valid() && self.inner.value().is_empty() {
+            self.inner.next()?;
+        }
+        Ok(())
     }
 }
 
@@ -25,19 +34,21 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.inner.is_valid()
     }
 
     fn key(&self) -> &[u8] {
-        unimplemented!()
+        self.inner.key().raw_ref()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.inner.value()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.inner.next()?;
+        self.skip_delete_value()?;
+        Ok(())
     }
 }
 
@@ -46,14 +57,14 @@ impl StorageIterator for LsmIterator {
 /// `is_valid` should return false, and `next` should always return an error.
 pub struct FusedIterator<I: StorageIterator> {
     iter: I,
-    has_errored: bool,
+    happend_err: bool,
 }
 
 impl<I: StorageIterator> FusedIterator<I> {
     pub fn new(iter: I) -> Self {
         Self {
             iter,
-            has_errored: false,
+            happend_err: false,
         }
     }
 }
@@ -62,18 +73,31 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
     type KeyType<'a> = I::KeyType<'a> where Self: 'a;
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.happend_err && self.iter.is_valid()
     }
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        self.iter.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.iter.value()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.happend_err {
+            return Err(anyhow::anyhow!(
+                "Iterator happend error before, should not call next again"
+            ));
+        }
+        if !self.iter.is_valid() {
+            // Do nothing
+            return Ok(());
+        }
+        if let Err(e) = self.iter.next() {
+            self.happend_err = true;
+            return Err(e);
+        }
+        Ok(())
     }
 }

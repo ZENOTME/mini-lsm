@@ -47,7 +47,34 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let iters = iters
+            .into_iter()
+            .filter(|iter| iter.is_valid())
+            .enumerate()
+            .map(|(idx, iter)| HeapWrapper(idx, iter));
+        let mut heap = BinaryHeap::from_iter(iters);
+
+        Self {
+            current: heap.pop(),
+            iters: heap,
+        }
+    }
+
+    fn remove_duplicate(&mut self) -> Result<()> {
+        assert!(self.current.is_some());
+        while let Some(item) = self.iters.peek() {
+            if item.1.key() == self.current.as_ref().unwrap().1.key() {
+                assert!(self.current.as_ref().unwrap().0 < item.0);
+                let mut item = self.iters.pop().unwrap();
+                item.1.next()?;
+                if item.1.is_valid() {
+                    self.iters.push(item);
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -57,18 +84,35 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.remove_duplicate()?;
+
+        self.current.as_mut().unwrap().1.next()?;
+
+        if self.current.as_ref().unwrap().1.is_valid() {
+            if let Some(item) = self.iters.peek() {
+                // # TODO
+                // > wired here
+                if *item > *self.current.as_ref().unwrap() {
+                    let new_current = self.iters.pop().unwrap();
+                    let old_current = std::mem::replace(&mut self.current, Some(new_current));
+                    self.iters.push(old_current.unwrap());
+                }
+            }
+        } else {
+            self.current = self.iters.pop();
+        }
+        Ok(())
     }
 }
