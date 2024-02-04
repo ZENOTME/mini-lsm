@@ -61,7 +61,7 @@ impl BlockIterator {
     /// Creates a block iterator and seek to the first entry.
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
         let mut iter = Self::new(block);
-        if iter.block.offsets.len() == 0 {
+        if iter.block.offsets.is_empty() {
             return iter;
         }
         iter.set_state_index(0);
@@ -72,7 +72,7 @@ impl BlockIterator {
     /// Creates a block iterator and seek to the first key that >= `key`.
     pub fn create_and_seek_to_key(block: Arc<Block>, key: KeySlice) -> Self {
         let mut iter = Self::new(block);
-        if iter.block.offsets.len() == 0 {
+        if iter.block.offsets.is_empty() {
             return iter;
         }
         let (first_key, _) = Self::entry_from_index(&iter.block, 0);
@@ -98,12 +98,12 @@ impl BlockIterator {
     /// Returns true if the iterator is valid.
     /// Note: You may want to make use of `key`
     pub fn is_valid(&self) -> bool {
-        return self.key.len() > 0;
+        !self.key.is_empty()
     }
 
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
-        if self.block.offsets.len() == 0 {
+        if self.block.offsets.is_empty() {
             return;
         }
         self.set_state_index(0);

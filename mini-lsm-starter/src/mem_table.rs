@@ -97,12 +97,18 @@ impl MemTable {
         if res.is_removed() {
             // Process the case that the key already exists in the map.
             let update_len = value_len as i64 - res.value().len() as i64;
-            if update_len > 0 {
-                self.approximate_size
-                    .fetch_add(update_len as usize, std::sync::atomic::Ordering::Relaxed);
-            } else if update_len < 0 {
-                self.approximate_size
-                    .fetch_sub((-update_len) as usize, std::sync::atomic::Ordering::Relaxed);
+            match update_len.cmp(&0) {
+                std::cmp::Ordering::Less => {
+                    self.approximate_size
+                        .fetch_sub((-update_len) as usize, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::cmp::Ordering::Greater => {
+                    self.approximate_size
+                        .fetch_add(update_len as usize, std::sync::atomic::Ordering::Relaxed);
+                }
+                std::cmp::Ordering::Equal => {
+                    // Do nothing
+                }
             }
         } else {
             self.approximate_size
