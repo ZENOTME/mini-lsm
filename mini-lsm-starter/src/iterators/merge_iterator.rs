@@ -84,10 +84,17 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
+        // self.current.as_ref().map(|v| v.1.key()).unwrap_or_default()
+        // Panic if the iterator is not valid
         self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
+        // self.current
+        //     .as_ref()
+        //     .map(|v| v.1.value())
+        //     .unwrap_or_default()
+        // Panic if the iterator is not valid
         self.current.as_ref().unwrap().1.value()
     }
 

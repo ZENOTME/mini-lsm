@@ -11,6 +11,7 @@ pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
     // Add fields as need
+    is_a: bool,
 }
 
 impl<
@@ -19,7 +20,24 @@ impl<
     > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let mut res = Self { a, b, is_a: true };
+        res.update_state()?;
+        Ok(res)
+    }
+
+    fn update_state(&mut self) -> Result<()> {
+        // Remove duplicate keys
+        while self.a.is_valid() && self.b.is_valid() && self.a.key() == self.b.key() {
+            self.b.next()?;
+        }
+
+        let is_a = if self.a.is_valid() && self.b.is_valid() {
+            self.a.key() < self.b.key()
+        } else {
+            self.a.is_valid()
+        };
+        self.is_a = is_a;
+        Ok(())
     }
 }
 
@@ -31,18 +49,32 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        if self.is_a {
+            self.a.key()
+        } else {
+            self.b.key()
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if self.is_a {
+            self.a.value()
+        } else {
+            self.b.value()
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.a.is_valid() || self.b.is_valid()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.is_a {
+            self.a.next()?;
+        } else {
+            self.b.next()?;
+        }
+        self.update_state()?;
+        Ok(())
     }
 }
