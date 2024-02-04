@@ -25,8 +25,7 @@ impl Block {
             &self
                 .offsets
                 .iter()
-                .map(|offset| offset.to_be_bytes())
-                .flatten()
+                .flat_map(|offset| offset.to_be_bytes())
                 .collect::<Vec<u8>>(),
         );
         buf.extend_from_slice(&len.to_be_bytes());
