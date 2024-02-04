@@ -1,24 +1,50 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use std::ops::Bound;
+
 use anyhow::Result;
 
 use crate::{
-    iterators::{merge_iterator::MergeIterator, StorageIterator},
+    iterators::{
+        merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator,
+    },
+    key::KeyVec,
     mem_table::MemTableIterator,
+    table::SsTableIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
-type LsmIteratorInner = MergeIterator<MemTableIterator>;
+type LsmIteratorInner =
+    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    end: Bound<KeyVec>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut res = Self { inner: iter };
+    pub(crate) fn new(
+        mem_iter: MergeIterator<MemTableIterator>,
+        sst_iter: MergeIterator<SsTableIterator>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+    ) -> Result<Self> {
+        let mut res = Self {
+            inner: TwoMergeIterator::create(mem_iter, sst_iter)?,
+            end: match upper {
+                Bound::Included(upper) => Bound::Included(KeyVec::from_vec(upper.to_vec())),
+                Bound::Excluded(upper) => Bound::Excluded(KeyVec::from_vec(upper.to_vec())),
+                Bound::Unbounded => Bound::Unbounded,
+            },
+        };
         res.skip_delete_value()?;
+        // Skip lower bound
+        if let Bound::Excluded(lower) = lower {
+            if res.key() == lower {
+                res.next()?;
+            }
+        }
         Ok(res)
     }
 
@@ -34,7 +60,15 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid()
+        match &self.end {
+            Bound::Included(upper) => {
+                self.inner.is_valid() && self.inner.key() <= upper.as_key_slice()
+            }
+            Bound::Excluded(upper) => {
+                self.inner.is_valid() && self.inner.key() < upper.as_key_slice()
+            }
+            Bound::Unbounded => self.inner.is_valid(),
+        }
     }
 
     fn key(&self) -> &[u8] {
