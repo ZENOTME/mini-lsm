@@ -41,7 +41,7 @@ impl LsmIterator {
         res.skip_delete_value()?;
         // Skip lower bound
         if let Bound::Excluded(lower) = lower {
-            if res.key() == lower {
+            if res.is_valid() && res.key() == lower {
                 res.next()?;
             }
         }
@@ -83,6 +83,10 @@ impl StorageIterator for LsmIterator {
         self.inner.next()?;
         self.skip_delete_value()?;
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.inner.num_active_iterators()
     }
 }
 
@@ -133,5 +137,9 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
             return Err(e);
         }
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.iter.num_active_iterators()
     }
 }
