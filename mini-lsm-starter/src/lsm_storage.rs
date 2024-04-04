@@ -356,20 +356,24 @@ impl LsmStorageInner {
         Ok(state.memtable.approximate_size() >= self.options.target_sst_size)
     }
 
+    fn try_freeze(&self) -> Result<()> {
+        let lock = self.state_lock.lock();
+        let must_freeze = {
+            let state = self.state.read();
+            state.memtable.approximate_size() >= self.options.target_sst_size
+        };
+        if must_freeze {
+            self.force_freeze_memtable(&lock)?;
+        }
+        Ok(())
+    }
+
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let may_need_freeze = self.put_inner(key, value)?;
         // flush memtable if necessary
         if may_need_freeze {
-            let lock = self.state_lock.lock();
-            // Check again after acquiring the lock
-            let must_freeze = {
-                let state = self.state.read();
-                state.memtable.approximate_size() >= self.options.target_sst_size
-            };
-            if must_freeze {
-                self.force_freeze_memtable(&lock)?;
-            }
+            self.try_freeze()?;
         }
         Ok(())
     }
@@ -423,28 +427,25 @@ impl LsmStorageInner {
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
         let _guard = self.state_lock.lock();
 
-        let state = self.state.read();
-        let Some(memtable) = state.imm_memtables.last().cloned() else {
+        let mut snapshot = self.state.read().as_ref().clone();
+
+        // Create a new SSTable
+        let sst_table = if let Some(memtable) = snapshot.imm_memtables.last() {
+            let sst_path = self.path_of_sst(memtable.id());
+            let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+            memtable.flush(&mut sst_builder)?;
+            Arc::new(sst_builder.build(memtable.id(), Some(self.block_cache.clone()), sst_path)?)
+        } else {
             return Err(anyhow::anyhow!("No imm memtable to flush"));
         };
-        drop(state);
 
-        let sst_path = self.path_of_sst(memtable.id());
-        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
-        memtable.flush(&mut sst_builder)?;
-        let sst_table =
-            Arc::new(sst_builder.build(memtable.id(), Some(self.block_cache.clone()), sst_path)?);
+        // Update snapshot
+        snapshot.imm_memtables.pop();
+        snapshot.l0_sstables.insert(0, sst_table.sst_id());
+        snapshot.sstables.insert(sst_table.sst_id(), sst_table);
 
+        // Update state
         let mut write_state = self.state.write();
-        let mut snapshot = write_state.as_ref().clone();
-        let index = write_state
-            .imm_memtables
-            .iter()
-            .position(|x| x.id() == memtable.id())
-            .expect("memtable not found");
-        snapshot.imm_memtables.remove(index);
-        snapshot.l0_sstables.insert(0, memtable.id());
-        snapshot.sstables.insert(memtable.id(), sst_table);
         *write_state = Arc::new(snapshot);
 
         Ok(())
