@@ -122,21 +122,7 @@ impl MemTable {
 
     /// Get an iterator over a range of keys.
     pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
-        let mut iterator = MemTableIteratorBuilder {
-            map: self.map.clone(),
-            iter_builder: |map: &Arc<SkipMap<Bytes, Bytes>>| {
-                map.range((map_bound(lower), map_bound(upper)))
-            },
-            item: (Bytes::new(), Bytes::new()),
-        }
-        .build();
-        iterator.with_mut(|v| {
-            // Poll the first element.
-            if let Some(res) = v.iter.next() {
-                *v.item = (res.key().clone(), res.value().clone());
-            }
-        });
-        iterator
+        MemTableIterator::create(self.map.clone(), lower, upper)
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -179,6 +165,26 @@ pub struct MemTableIterator {
     iter: SkipMapRangeIter<'this>,
     /// Stores the current key-value pair.
     item: (Bytes, Bytes),
+}
+
+impl MemTableIterator {
+    fn create(map: Arc<SkipMap<Bytes, Bytes>>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Self {
+        let mut iterator = MemTableIteratorBuilder {
+            map,
+            iter_builder: |map: &Arc<SkipMap<Bytes, Bytes>>| {
+                map.range((map_bound(lower), map_bound(upper)))
+            },
+            item: (Bytes::new(), Bytes::new()),
+        }
+        .build();
+        iterator.with_mut(|v| {
+            // Poll the first element.
+            if let Some(res) = v.iter.next() {
+                *v.item = (res.key().clone(), res.value().clone());
+            }
+        });
+        iterator
+    }
 }
 
 impl StorageIterator for MemTableIterator {

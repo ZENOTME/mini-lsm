@@ -42,7 +42,6 @@ impl<I: StorageIterator> Ord for HeapWrapper<I> {
 /// iterators, prefer the one with smaller index.
 pub struct MergeIterator<I: StorageIterator> {
     iters: BinaryHeap<HeapWrapper<I>>,
-    current: Option<HeapWrapper<I>>,
 }
 
 impl<I: StorageIterator> MergeIterator<I> {
@@ -52,29 +51,8 @@ impl<I: StorageIterator> MergeIterator<I> {
             .filter(|iter| iter.is_valid())
             .enumerate()
             .map(|(idx, iter)| HeapWrapper(idx, iter));
-        let mut heap = BinaryHeap::from_iter(iters);
-
-        Self {
-            current: heap.pop(),
-            iters: heap,
-        }
-    }
-
-    fn remove_duplicate(&mut self) -> Result<()> {
-        assert!(self.current.is_some());
-        while let Some(item) = self.iters.peek() {
-            if item.1.key() == self.current.as_ref().unwrap().1.key() {
-                assert!(self.current.as_ref().unwrap().0 < item.0);
-                let mut item = self.iters.pop().unwrap();
-                item.1.next()?;
-                if item.1.is_valid() {
-                    self.iters.push(item);
-                }
-            } else {
-                break;
-            }
-        }
-        Ok(())
+        let iters = BinaryHeap::from_iter(iters);
+        Self { iters }
     }
 }
 
@@ -84,53 +62,52 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        // self.current.as_ref().map(|v| v.1.key()).unwrap_or_default()
-        // Panic if the iterator is not valid
-        self.current.as_ref().unwrap().1.key()
+        self.iters
+            .peek()
+            .expect("Only call this when it's valid.")
+            .1
+            .key()
     }
 
     fn value(&self) -> &[u8] {
-        // self.current
-        //     .as_ref()
-        //     .map(|v| v.1.value())
-        //     .unwrap_or_default()
-        // Panic if the iterator is not valid
-        self.current.as_ref().unwrap().1.value()
+        self.iters
+            .peek()
+            .expect("Only call this when it's valid.")
+            .1
+            .value()
     }
 
     fn is_valid(&self) -> bool {
-        self.current.is_some()
+        !self.iters.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        self.remove_duplicate()?;
+        let mut top = self.iters.pop().unwrap();
+        let key = top.1.key();
 
-        self.current.as_mut().unwrap().1.next()?;
-
-        if self.current.as_ref().unwrap().1.is_valid() {
-            if let Some(item) = self.iters.peek() {
-                // # TODO
-                // > wired here
-                if *item > *self.current.as_ref().unwrap() {
-                    let new_current = self.iters.pop().unwrap();
-                    let old_current = std::mem::replace(&mut self.current, Some(new_current));
-                    self.iters.push(old_current.unwrap());
+        // Remove duplicate
+        while let Some(item) = self.iters.peek() {
+            if item.1.key() == key {
+                let mut item = self.iters.pop().unwrap();
+                item.1.next()?;
+                if item.1.is_valid() {
+                    self.iters.push(item);
                 }
+            } else {
+                break;
             }
-        } else {
-            self.current = self.iters.pop();
         }
+
+        // Push back
+        top.1.next()?;
+        if top.1.is_valid() {
+            self.iters.push(top);
+        }
+
         Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {
-        let mut sum = 0;
-        if let Some(current) = &self.current {
-            sum += current.1.num_active_iterators();
-        }
-        self.iters.iter().for_each(|iter| {
-            sum += iter.1.num_active_iterators();
-        });
-        sum
+        self.iters.len()
     }
 }
