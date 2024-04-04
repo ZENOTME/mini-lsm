@@ -296,28 +296,31 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
+    // `Ok(None)` indicates that can't find the value.
+    fn get_from_mem(&self, snapshot: &LsmStorageState, key: &[u8]) -> Result<Option<Bytes>> {
+        if let Some(value) = snapshot.memtable.get(key) {
+            return Ok(Some(value));
+        }
+        for memtable in &snapshot.imm_memtables {
+            if let Some(value) = memtable.get(key) {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
+    }
+
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let snapshot = {
-            let state = self.state.read();
-            state.as_ref().clone()
+            let guard = self.state.read();
+            guard.clone()
         };
         // Try get from mem table.
-        if let Some(value) = snapshot.memtable.as_ref().get(key) {
+        if let Some(value) = self.get_from_mem(&snapshot, key)? {
             if value.is_empty() {
                 return Ok(None);
             } else {
                 return Ok(Some(value));
-            }
-        } else {
-            for memtable in &snapshot.imm_memtables {
-                if let Some(value) = memtable.get(key) {
-                    if value.is_empty() {
-                        return Ok(None);
-                    } else {
-                        return Ok(Some(value));
-                    }
-                }
             }
         }
         //Try get from SSTable
@@ -346,19 +349,25 @@ impl LsmStorageInner {
         unimplemented!()
     }
 
-    /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    // Put key value in memtable and return whether the memtable may need be frozen
+    fn put_inner(&self, key: &[u8], value: &[u8]) -> Result<bool> {
         let state = self.state.read();
         state.memtable.as_ref().put(key, value)?;
-        let may_need_freeze = state.memtable.approximate_size() >= self.options.target_sst_size;
-        drop(state);
+        Ok(state.memtable.approximate_size() >= self.options.target_sst_size)
+    }
+
+    /// Put a key-value pair into the storage by writing into the current memtable.
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let may_need_freeze = self.put_inner(key, value)?;
         // flush memtable if necessary
         if may_need_freeze {
             let lock = self.state_lock.lock();
-            let state = self.state.read();
-            // check again after acquiring the lock
-            if state.memtable.approximate_size() >= self.options.target_sst_size {
-                drop(state);
+            // Check again after acquiring the lock
+            let must_freeze = {
+                let state = self.state.read();
+                state.memtable.approximate_size() >= self.options.target_sst_size
+            };
+            if must_freeze {
                 self.force_freeze_memtable(&lock)?;
             }
         }
@@ -390,21 +399,23 @@ impl LsmStorageInner {
         unimplemented!()
     }
 
-    /// Force freeze the current memtable to an immutable memtable
-    pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        // create new memtable
+    // Create a new state with the current memtable frozen
+    fn new_state_for_freeze(&self) -> Arc<LsmStorageState> {
+        let mut snapshot = self.state.read().as_ref().clone();
+
         let next_sst_id = self.next_sst_id();
         let new_mem_table = Arc::new(MemTable::create(next_sst_id));
 
-        let mut state = self.state.write();
-        // update state
-        // # TODO
-        // Can we avoid cloning the whole state?
-        let mut snapshot = state.as_ref().clone();
         let old_memtable = std::mem::replace(&mut snapshot.memtable, new_mem_table);
         snapshot.imm_memtables.insert(0, old_memtable);
-        *state = Arc::new(snapshot);
 
+        Arc::new(snapshot)
+    }
+
+    /// Force freeze the current memtable to an immutable memtable
+    pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
+        let new_state = self.new_state_for_freeze();
+        *self.state.write() = new_state;
         Ok(())
     }
 

@@ -94,21 +94,17 @@ impl MemTable {
         let key = Bytes::copy_from_slice(key);
         let value = Bytes::copy_from_slice(value);
         let res = self.map.insert(key, value);
+
+        // Update the approximate size.
         if res.is_removed() {
             // Process the case that the key already exists in the map.
             let update_len = value_len as i64 - res.value().len() as i64;
-            match update_len.cmp(&0) {
-                std::cmp::Ordering::Less => {
-                    self.approximate_size
-                        .fetch_sub((-update_len) as usize, std::sync::atomic::Ordering::Relaxed);
-                }
-                std::cmp::Ordering::Greater => {
-                    self.approximate_size
-                        .fetch_add(update_len as usize, std::sync::atomic::Ordering::Relaxed);
-                }
-                std::cmp::Ordering::Equal => {
-                    // Do nothing
-                }
+            if update_len < 0 {
+                self.approximate_size
+                    .fetch_sub(-update_len as usize, std::sync::atomic::Ordering::Relaxed);
+            } else if update_len > 0 {
+                self.approximate_size
+                    .fetch_add(update_len as usize, std::sync::atomic::Ordering::Relaxed);
             }
         } else {
             self.approximate_size
