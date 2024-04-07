@@ -63,7 +63,7 @@ impl Manifest {
         let mut file = self.file.lock();
         let mut records = self.records.lock();
         let content = serde_json::to_vec(&record)?;
-        file.write(&content)?;
+        file.write_all(&content)?;
         records.push(record);
 
         Ok(())
