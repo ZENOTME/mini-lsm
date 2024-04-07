@@ -244,31 +244,21 @@ impl SsTable {
         self.max_ts
     }
 
-    pub fn within_range(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
-        let lower_key = match lower {
-            Bound::Included(l) => Bound::Included(KeySlice::from_slice(l)),
-            Bound::Excluded(l) => Bound::Excluded(KeySlice::from_slice(l)),
-            Bound::Unbounded => Bound::Unbounded,
+    // Check whether there is an overlap between the range of this SSTable and the given range.
+    //
+    // Check using the reverse condition, there are 2 cases that there is no overlap:
+    // --1.[firstkey,lastkey]-- lower ------------ upper --2.[firstkey,lastkey]--
+    pub fn overlap_range(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
+        let out_of_range_left = match lower {
+            Bound::Included(l) => l > self.last_key.as_key_slice().into_inner(),
+            Bound::Excluded(l) => l >= self.last_key.as_key_slice().into_inner(),
+            Bound::Unbounded => false,
         };
-        let upper_key = match upper {
-            Bound::Included(u) => Bound::Included(KeySlice::from_slice(u)),
-            Bound::Excluded(u) => Bound::Excluded(KeySlice::from_slice(u)),
-            Bound::Unbounded => Bound::Unbounded,
+        let out_of_range_right = match upper {
+            Bound::Included(u) => u < self.first_key.as_key_slice().into_inner(),
+            Bound::Excluded(u) => u <= self.first_key.as_key_slice().into_inner(),
+            Bound::Unbounded => false,
         };
-        let include_in_range = |key: KeySlice| -> bool {
-            match (lower_key, upper_key) {
-                (Bound::Included(l), Bound::Included(u)) => l <= key && key <= u,
-                (Bound::Included(l), Bound::Excluded(u)) => l <= key && key < u,
-                (Bound::Excluded(l), Bound::Included(u)) => l < key && key <= u,
-                (Bound::Excluded(l), Bound::Excluded(u)) => l < key && key < u,
-                (Bound::Unbounded, Bound::Included(u)) => key <= u,
-                (Bound::Unbounded, Bound::Excluded(u)) => key < u,
-                (Bound::Included(l), Bound::Unbounded) => l <= key,
-                (Bound::Excluded(l), Bound::Unbounded) => l < key,
-                (Bound::Unbounded, Bound::Unbounded) => true,
-            }
-        };
-        include_in_range(self.first_key.as_key_slice())
-            || include_in_range(self.last_key.as_key_slice())
+        !(out_of_range_left || out_of_range_right)
     }
 }

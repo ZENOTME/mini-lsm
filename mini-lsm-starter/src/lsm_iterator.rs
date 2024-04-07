@@ -7,16 +7,18 @@ use anyhow::Result;
 
 use crate::{
     iterators::{
-        merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator,
+        concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
+        two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
     key::KeyVec,
     mem_table::MemTableIterator,
-    table::SsTableIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
-type LsmIteratorInner =
-    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
+type LsmIteratorInner = TwoMergeIterator<MergeIterator<MemTableIterator>, LevelsIteratorInner>;
+/// One for l0, one for others.
+type LevelsIteratorInner =
+    TwoMergeIterator<MergeIterator<SstConcatIterator>, MergeIterator<SstConcatIterator>>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
@@ -26,12 +28,12 @@ pub struct LsmIterator {
 impl LsmIterator {
     pub(crate) fn new(
         mem_iter: MergeIterator<MemTableIterator>,
-        sst_iter: MergeIterator<SsTableIterator>,
+        levels_iter: LevelsIteratorInner,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<Self> {
         let mut res = Self {
-            inner: TwoMergeIterator::create(mem_iter, sst_iter)?,
+            inner: TwoMergeIterator::create(mem_iter, levels_iter)?,
             end: match upper {
                 Bound::Included(upper) => Bound::Included(KeyVec::from_vec(upper.to_vec())),
                 Bound::Excluded(upper) => Bound::Excluded(KeyVec::from_vec(upper.to_vec())),

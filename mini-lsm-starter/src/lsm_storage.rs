@@ -15,14 +15,16 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -324,19 +326,14 @@ impl LsmStorageInner {
             }
         }
         //Try get from SSTable
-        let sst_iter = {
-            let iters = snapshot
-                .l0_sstables
-                .iter()
-                .map(|id| {
-                    Ok(Box::new(SsTableIterator::create_and_seek_to_key(
-                        snapshot.sstables.get(id).unwrap().clone(),
-                        KeySlice::from_slice(key),
-                    )?))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            MergeIterator::create(iters)
-        };
+        let sst_iter = self.create_full_iter(
+            &snapshot,
+            &snapshot.l0_sstables,
+            &snapshot.levels,
+            Bound::Included(key),
+            Bound::Unbounded,
+        )?;
+
         if sst_iter.is_valid() && sst_iter.key().raw_ref() == key && !sst_iter.value().is_empty() {
             Ok(Some(Bytes::copy_from_slice(sst_iter.value())))
         } else {
@@ -456,6 +453,96 @@ impl LsmStorageInner {
         Ok(())
     }
 
+    pub(crate) fn create_sort_run_iter(
+        snapshot: &LsmStorageState,
+        sstable_id: &[usize],
+        lower: Bound<&[u8]>,
+    ) -> Result<SstConcatIterator> {
+        let sstables = sstable_id
+            .iter()
+            .map(|id| {
+                snapshot
+                    .sstables
+                    .get(id)
+                    .ok_or(anyhow::anyhow!("sstable not found"))
+                    .cloned()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        match lower {
+            Bound::Included(key) => {
+                SstConcatIterator::create_and_seek_to_key(sstables, KeySlice::from_slice(key))
+            }
+            Bound::Excluded(key) => {
+                let mut iter =
+                    SstConcatIterator::create_and_seek_to_key(sstables, KeySlice::from_slice(key))?;
+                if iter.is_valid() && iter.key().raw_ref() == key {
+                    iter.next()?;
+                }
+                Ok(iter)
+            }
+            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(sstables),
+        }
+    }
+
+    pub(crate) fn crate_level0_iter(
+        snapshot: &LsmStorageState,
+        sstable_ids: &[usize],
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+    ) -> Result<MergeIterator<SstConcatIterator>> {
+        // Filter out sstables that overlap with the range
+        let l0_sst_ids = sstable_ids
+            .iter()
+            .filter_map(|id| {
+                let sst = snapshot.sstables.get(id).unwrap();
+                if sst.overlap_range(lower, upper) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        // Create SstConcatIterator for each sstable
+        let sst0_sort_run_iters = l0_sst_ids
+            .iter()
+            .map(|&id| {
+                Ok(Box::new(Self::create_sort_run_iter(
+                    snapshot,
+                    &[id],
+                    lower,
+                )?))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(MergeIterator::create(sst0_sort_run_iters))
+    }
+
+    // Create iterator for all sstables, we seperate the sstables into multiple sort run and create SstConcatIterator for each sort run.
+    // Finally, we merge all SstConcatIterator into one MergeIterator.
+    pub(crate) fn create_full_iter(
+        &self,
+        snapshot: &LsmStorageState,
+        l0_sstables: &[usize],
+        levels_sstable: &[(usize, Vec<usize>)],
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+    ) -> Result<TwoMergeIterator<MergeIterator<SstConcatIterator>, MergeIterator<SstConcatIterator>>>
+    {
+        let sst0_sort_run_iters = Self::crate_level0_iter(snapshot, l0_sstables, lower, upper)?;
+
+        let other_levels_sort_run_iters = MergeIterator::create(
+            levels_sstable
+                .iter()
+                .map(|(_, sst_ids)| {
+                    Ok(Box::new(Self::create_sort_run_iter(
+                        snapshot, sst_ids, lower,
+                    )?))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
+
+        TwoMergeIterator::create(sst0_sort_run_iters, other_levels_sort_run_iters)
+    }
+
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
@@ -480,26 +567,13 @@ impl LsmStorageInner {
             MergeIterator::create(iters)
         };
 
-        let sst_iter = {
-            let mut iters = Vec::with_capacity(snapshot.l0_sstables.len());
-            let key = match lower {
-                Bound::Included(x) | Bound::Excluded(x) => Some(KeySlice::from_slice(x)),
-                Bound::Unbounded => None,
-            };
-            for id in &snapshot.l0_sstables {
-                let sst = snapshot.sstables.get(id).unwrap().clone();
-                if !sst.within_range(lower, upper) {
-                    continue;
-                }
-                let iter = if let Some(key) = key {
-                    SsTableIterator::create_and_seek_to_key(sst, key)?
-                } else {
-                    SsTableIterator::create_and_seek_to_first(sst)?
-                };
-                iters.push(Box::new(iter));
-            }
-            MergeIterator::create(iters)
-        };
+        let sst_iter = self.create_full_iter(
+            &snapshot,
+            &snapshot.l0_sstables,
+            &snapshot.levels,
+            lower,
+            upper,
+        )?;
 
         let lsm_iterator = LsmIterator::new(mem_iter, sst_iter, lower, upper)?;
 
