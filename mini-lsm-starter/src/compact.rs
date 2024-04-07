@@ -20,6 +20,7 @@ use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest;
 use crate::table::{SsTable, SsTableBuilder};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -242,21 +243,30 @@ impl LsmStorageInner {
     }
 
     fn trigger_compaction(&self) -> Result<()> {
-        let _gurad = self.state_lock.lock();
+        let gurad = self.state_lock.lock();
         let task = self
             .compaction_controller
             .generate_compaction_task(&self.state.read());
         if let Some(task) = task {
             let new_sstables = self.compact(&task)?;
+            let output_sst_ids = new_sstables.iter().map(|s| s.sst_id()).collect::<Vec<_>>();
             let (mut new_state, _delete) = self.compaction_controller.apply_compaction_result(
                 &self.state.read(),
                 &task,
-                &new_sstables.iter().map(|s| s.sst_id()).collect::<Vec<_>>(),
+                &output_sst_ids,
             );
             new_state
                 .sstables
                 .extend(new_sstables.into_iter().map(|s| (s.sst_id(), s)));
             *self.state.write() = Arc::new(new_state);
+
+            self.sync_dir()?;
+            if let Some(manifest) = &self.manifest {
+                manifest.add_record(
+                    &gurad,
+                    manifest::ManifestRecord::Compaction(task, output_sst_ids),
+                )?;
+            }
             // # TOOD:
             // Delete here
         }
