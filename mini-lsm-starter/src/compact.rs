@@ -114,36 +114,50 @@ pub enum CompactionOptions {
 impl LsmStorageInner {
     // Build a new sstable using sstable builder.
     #[inline]
-    fn build_sst_builder(&self, builder: SsTableBuilder) -> Result<SsTable> {
+    fn build_sst_builder(&self, builder: SsTableBuilder) -> Result<Option<SsTable>> {
+        if builder.is_empty() {
+            return Ok(None);
+        }
         let sst_id = self.next_sst_id();
         let sst_path = self.path_of_sst(sst_id);
         let sstable = builder.build(sst_id, Some(self.block_cache.clone()), sst_path)?;
-        Ok(sstable)
+        Ok(Some(sstable))
     }
 
     fn generate_sst_from_iter(
         &self,
         mut merge_iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
     ) -> Result<Vec<Arc<SsTable>>> {
+        let watermark = self.mvcc.as_ref().unwrap().watermark();
+
         let mut res_sstables = Vec::new();
         let mut builder = SsTableBuilder::new(self.options.block_size);
         while merge_iter.is_valid() {
-            if merge_iter.value().is_empty() {
+            let mut latest_ts = None;
+            let cur_key = merge_iter.key().key_ref().to_owned();
+            while merge_iter.is_valid() && merge_iter.key().key_ref() == cur_key {
+                if merge_iter.key().ts() > watermark {
+                    builder.add(merge_iter.key(), merge_iter.value());
+                } else if latest_ts.is_none() {
+                    latest_ts = Some(merge_iter.key().ts());
+                    if !merge_iter.value().is_empty() {
+                        builder.add(merge_iter.key(), merge_iter.value());
+                    }
+                }
                 merge_iter.next()?;
-                continue;
             }
-            builder.add(merge_iter.key(), merge_iter.value());
             if builder.estimated_size() >= self.options.target_sst_size {
-                let new_sstable = self.build_sst_builder(std::mem::replace(
+                if let Some(new_sstable) = self.build_sst_builder(std::mem::replace(
                     &mut builder,
                     SsTableBuilder::new(self.options.block_size),
-                ))?;
-                res_sstables.push(Arc::new(new_sstable));
+                ))? {
+                    res_sstables.push(Arc::new(new_sstable));
+                }
             }
-            merge_iter.next()?;
         }
-        let new_sstable = self.build_sst_builder(builder)?;
-        res_sstables.push(Arc::new(new_sstable));
+        if let Some(new_sstable) = self.build_sst_builder(builder)? {
+            res_sstables.push(Arc::new(new_sstable));
+        }
         Ok(res_sstables)
     }
 
@@ -219,7 +233,7 @@ impl LsmStorageInner {
             (state.l0_sstables.clone(), state.levels[0].1.clone())
         };
 
-        if l0_sst.is_empty() {
+        if l0_sst.is_empty() && l1_sst.is_empty() {
             return Ok(());
         }
 
@@ -228,7 +242,7 @@ impl LsmStorageInner {
             l1_sstables: l1_sst,
         };
         let new_sstables = self.compact(&task)?;
-        assert!(!new_sstables.is_empty());
+        // assert!(!new_sstables.is_empty());
 
         let _guard = self.state_lock.lock();
         let mut state = self.state.read().as_ref().clone();

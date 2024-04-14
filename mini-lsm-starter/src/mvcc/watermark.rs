@@ -7,6 +7,12 @@ pub struct Watermark {
     readers: BTreeMap<u64, usize>,
 }
 
+impl Default for Watermark {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Watermark {
     pub fn new() -> Self {
         Self {
@@ -14,11 +20,24 @@ impl Watermark {
         }
     }
 
-    pub fn add_reader(&mut self, ts: u64) {}
+    pub fn add_reader(&mut self, ts: u64) {
+        *self.readers.entry(ts).or_default() += 1;
+    }
 
-    pub fn remove_reader(&mut self, ts: u64) {}
+    pub fn remove_reader(&mut self, ts: u64) {
+        if let Some(count) = self.readers.get_mut(&ts) {
+            *count -= 1;
+            if *count == 0 {
+                self.readers.remove(&ts);
+            }
+        }
+    }
 
     pub fn watermark(&self) -> Option<u64> {
-        Some(0)
+        self.readers.iter().min().map(|(ts, _)| *ts)
+    }
+
+    pub fn num_retained_snapshots(&self) -> usize {
+        self.readers.len()
     }
 }

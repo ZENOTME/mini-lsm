@@ -42,10 +42,8 @@ impl BlockMeta {
     ) {
         for meta in block_meta {
             buf.extend_from_slice(&meta.offset.to_be_bytes());
-            buf.extend_from_slice(&(meta.first_key.len() as u16).to_be_bytes());
-            buf.extend_from_slice(meta.first_key.raw_ref());
-            buf.extend_from_slice(&(meta.last_key.len() as u16).to_be_bytes());
-            buf.extend_from_slice(meta.last_key.raw_ref());
+            meta.first_key.encode(buf);
+            meta.last_key.encode(buf);
         }
     }
 
@@ -55,10 +53,8 @@ impl BlockMeta {
         let mut buf = buf;
         while buf.has_remaining() {
             let offset = buf.get_u64() as usize;
-            let first_key_len = buf.get_u16() as usize;
-            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len));
-            let last_key_len = buf.get_u16() as usize;
-            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len));
+            let first_key = KeyBytes::decode(&mut buf);
+            let last_key = KeyBytes::decode(&mut buf);
             res.push(BlockMeta {
                 offset,
                 first_key,
@@ -129,13 +125,25 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
+        // sst format:
+        // | data | block meta | block meta offset | max_ts |
         let file_len = file.size();
+
+        let mut offset = file_len;
+        let max_ts = {
+            offset -= 8;
+            let buf = file.read(offset, 8)?;
+            u64::from_be_bytes([
+                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+            ])
+        };
         let block_meta_offset = {
-            let buf = file.read(file_len - 4, 4)?;
+            offset -= 4;
+            let buf = file.read(offset, 4)?;
             u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
         };
-        let meta_buf_len = file_len - block_meta_offset as u64 - 4;
         let meta = {
+            let meta_buf_len = file_len - block_meta_offset as u64 - 4 - 8;
             let buf = file.read(block_meta_offset as u64, meta_buf_len)?;
             BlockMeta::decode_block_meta(buf.as_slice())
         };
@@ -154,7 +162,7 @@ impl SsTable {
             first_key: first_key_in_sst,
             last_key: last_key_in_sst,
             bloom: None,
-            max_ts: 0,
+            max_ts,
         })
     }
 
@@ -250,13 +258,13 @@ impl SsTable {
     // --1.[firstkey,lastkey]-- lower ------------ upper --2.[firstkey,lastkey]--
     pub fn overlap_range(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
         let out_of_range_left = match lower {
-            Bound::Included(l) => l > self.last_key.as_key_slice().into_inner(),
-            Bound::Excluded(l) => l >= self.last_key.as_key_slice().into_inner(),
+            Bound::Included(l) => l > self.last_key.as_key_slice().key_ref(),
+            Bound::Excluded(l) => l >= self.last_key.as_key_slice().key_ref(),
             Bound::Unbounded => false,
         };
         let out_of_range_right = match upper {
-            Bound::Included(u) => u < self.first_key.as_key_slice().into_inner(),
-            Bound::Excluded(u) => u <= self.first_key.as_key_slice().into_inner(),
+            Bound::Included(u) => u < self.first_key.as_key_slice().key_ref(),
+            Bound::Excluded(u) => u <= self.first_key.as_key_slice().key_ref(),
             Bound::Unbounded => false,
         };
         !(out_of_range_left || out_of_range_right)

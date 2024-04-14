@@ -35,15 +35,21 @@ impl BlockIterator {
     fn entry_from_index(block: &Block, index: usize) -> (KeySlice, (usize, usize)) {
         assert!(index < block.offsets.len());
         let offset = block.offsets[index] as usize;
+
+        let mut offset = offset;
+        let key_raw_len = i16::from_be_bytes([block.data[offset], block.data[offset + 1]]);
+        offset += 2;
         let key_len = i16::from_be_bytes([block.data[offset], block.data[offset + 1]]);
-        let key = &block.data[offset + 2..offset + 2 + key_len as usize];
-        let value_len = i16::from_be_bytes([
-            block.data[offset + 2 + key_len as usize],
-            block.data[offset + 2 + key_len as usize + 1],
-        ]);
-        let value_start = offset + 2 + key_len as usize + 2;
+        offset += 2;
+        let key = &block.data[offset..offset + key_len as usize];
+        offset += key_len as usize;
+        let ts = u64::from_be_bytes(block.data[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        let value_len = i16::from_be_bytes([block.data[offset], block.data[offset + 1]]);
+        offset += 2;
+        let value_start = offset;
         let value_end = value_start + value_len as usize;
-        (KeySlice::from_slice(key), (value_start, value_end))
+        (KeySlice::from_slice(key, ts), (value_start, value_end))
     }
 
     fn set_state_index(&mut self, index: usize) {

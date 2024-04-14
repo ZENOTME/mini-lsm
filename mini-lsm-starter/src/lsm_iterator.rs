@@ -10,7 +10,7 @@ use crate::{
         concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
         two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
-    key::KeyVec,
+    key::{KeySlice, KeyVec},
     mem_table::MemTableIterator,
 };
 
@@ -23,35 +23,62 @@ type LevelsIteratorInner =
 pub struct LsmIterator {
     inner: LsmIteratorInner,
     end: Bound<KeyVec>,
+    ts: u64,
 }
 
 impl LsmIterator {
     pub(crate) fn new(
         mem_iter: MergeIterator<MemTableIterator>,
         levels_iter: LevelsIteratorInner,
-        lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
+        lower: Bound<KeySlice>,
+        upper: Bound<KeySlice>,
+        ts: u64,
     ) -> Result<Self> {
-        let mut res = Self {
+        let mut iter = Self {
             inner: TwoMergeIterator::create(mem_iter, levels_iter)?,
             end: match upper {
-                Bound::Included(upper) => Bound::Included(KeyVec::from_vec(upper.to_vec())),
-                Bound::Excluded(upper) => Bound::Excluded(KeyVec::from_vec(upper.to_vec())),
+                Bound::Included(upper) => Bound::Included(upper.to_key_vec()),
+                Bound::Excluded(upper) => Bound::Excluded(upper.to_key_vec()),
                 Bound::Unbounded => Bound::Unbounded,
             },
+            ts,
         };
-        res.skip_delete_value()?;
-        // Skip lower bound
+
+        iter.move_key()?;
+        while iter.inner.is_valid() && iter.inner.value().is_empty() {
+            iter.next_key()?;
+            iter.move_key()?;
+        }
         if let Bound::Excluded(lower) = lower {
-            if res.is_valid() && res.key() == lower {
-                res.next()?;
+            if iter.is_valid() && iter.inner.key().key_ref() == lower.key_ref() {
+                iter.next_key()?;
             }
         }
-        Ok(res)
+        if let Bound::Excluded(upper) = upper {
+            if iter.is_valid() && iter.inner.key().key_ref() == upper.key_ref() {
+                iter.next_key()?;
+            }
+        }
+        iter.move_key()?;
+        while iter.inner.is_valid() && iter.inner.value().is_empty() {
+            iter.next_key()?;
+            iter.move_key()?;
+        }
+
+        Ok(iter)
     }
 
-    fn skip_delete_value(&mut self) -> Result<()> {
-        while self.inner.is_valid() && self.inner.value().is_empty() {
+    fn move_key(&mut self) -> Result<()> {
+        while self.inner.is_valid() && self.inner.key().ts() > self.ts {
+            self.inner.next()?;
+        }
+        Ok(())
+    }
+
+    fn next_key(&mut self) -> Result<()> {
+        let cur = self.inner.key().key_ref().to_vec();
+        self.inner.next()?;
+        while self.inner.is_valid() && self.inner.key().key_ref() == cur {
             self.inner.next()?;
         }
         Ok(())
@@ -67,14 +94,14 @@ impl StorageIterator for LsmIterator {
                 self.inner.is_valid() && self.inner.key() <= upper.as_key_slice()
             }
             Bound::Excluded(upper) => {
-                self.inner.is_valid() && self.inner.key() < upper.as_key_slice()
+                self.inner.is_valid() && self.inner.key().key_ref() != upper.key_ref()
             }
             Bound::Unbounded => self.inner.is_valid(),
         }
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.inner.key().key_ref()
     }
 
     fn value(&self) -> &[u8] {
@@ -82,8 +109,12 @@ impl StorageIterator for LsmIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.inner.next()?;
-        self.skip_delete_value()?;
+        self.next_key()?;
+        self.move_key()?;
+        while self.inner.is_valid() && self.inner.value().is_empty() {
+            self.next_key()?;
+            self.move_key()?;
+        }
         Ok(())
     }
 

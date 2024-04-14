@@ -35,14 +35,19 @@ impl BlockBuilder {
     /// Adds a key-value pair to the block. Returns false when the block is full.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        let added_len = NUM_LEN * 2 + key.len() + value.len() + NUM_LEN;
+        // |raw key len|key len|key|ts| + |value len|value| + offest
+        let added_key_len = key.encode_len();
+        let added_value_len = NUM_LEN + value.len();
+        let added_len = added_key_len + added_value_len + NUM_LEN;
+
         if !self.is_empty() && self.current_size() + added_len > self.block_size {
             return false;
         }
+
         self.offsets.push(self.data.len() as u16);
-        self.data
-            .extend_from_slice(&(key.len() as u16).to_be_bytes());
-        self.data.extend_from_slice(key.raw_ref());
+
+        key.encode(&mut self.data);
+
         self.data
             .extend_from_slice(&(value.len() as u16).to_be_bytes());
         self.data.extend_from_slice(value);
