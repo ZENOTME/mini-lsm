@@ -21,7 +21,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::{KeySlice, TS_DEFAULT, TS_RANGE_BEGIN, TS_RANGE_END};
+use crate::key::{KeySlice, TS_RANGE_BEGIN, TS_RANGE_END};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::MemTable;
@@ -394,12 +394,19 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
-        let txn = self.mvcc.as_ref().unwrap().new_txn(self.clone(), false);
+        let txn = self
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .new_txn(self.clone(), self.options.serializable);
         txn.get(key)
     }
 
-    /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+    pub fn write_batch_with_ts<T: AsRef<[u8]>>(
+        &self,
+        batch: &[WriteBatchRecord<T>],
+        ts: u64,
+    ) -> Result<()> {
         let put_batch = |batch: &[WriteBatchRecord<T>], ts: u64| -> Result<bool> {
             let state = self.state.read();
             for batch in batch {
@@ -418,18 +425,35 @@ impl LsmStorageInner {
             }
             Ok(state.memtable.approximate_size() >= self.options.target_sst_size)
         };
-        let may_need_freeze;
-        if let Some(mvcc) = &self.mvcc {
-            let _guard = mvcc.write_lock.lock();
-            let ts = mvcc.latest_commit_ts() + 1;
-            may_need_freeze = put_batch(batch, ts)?;
-            mvcc.update_commit_ts(ts);
-        } else {
-            may_need_freeze = put_batch(batch, TS_DEFAULT)?;
-        }
+        let may_need_freeze = {
+            let _guard = self.mvcc.as_ref().unwrap().write_lock.lock();
+            let may_need_freeze = put_batch(batch, ts)?;
+            self.mvcc.as_ref().unwrap().update_commit_ts(ts);
+            may_need_freeze
+        };
         if may_need_freeze {
             self.try_freeze()?;
         }
+        Ok(())
+    }
+
+    /// Write a batch of data into the storage. Implement in week 2 day 7.
+    pub fn write_batch<T: AsRef<[u8]>>(
+        self: &Arc<Self>,
+        batch: &[WriteBatchRecord<T>],
+    ) -> Result<()> {
+        let txn = self
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .new_txn(self.clone(), self.options.serializable);
+        for record in batch {
+            match record {
+                WriteBatchRecord::Put(key, value) => txn.put(key.as_ref(), value.as_ref()),
+                WriteBatchRecord::Del(key) => txn.delete(key.as_ref()),
+            }
+        }
+        txn.commit()?;
         Ok(())
     }
 
@@ -446,12 +470,12 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put(self: &Arc<Self>, key: &[u8], value: &[u8]) -> Result<()> {
         self.write_batch(&[WriteBatchRecord::Put(key, value)])
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, key: &[u8]) -> Result<()> {
+    pub fn delete(self: &Arc<Self>, key: &[u8]) -> Result<()> {
         self.write_batch(&[WriteBatchRecord::Del(key)])
     }
 
@@ -549,7 +573,11 @@ impl LsmStorageInner {
     }
 
     pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
-        Ok(self.mvcc.as_ref().unwrap().new_txn(self.clone(), false))
+        Ok(self
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .new_txn(self.clone(), self.options.serializable))
     }
 
     pub(crate) fn create_sort_run_iter(
@@ -681,7 +709,11 @@ impl LsmStorageInner {
 
     /// Create an iterator over a range of keys.
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        let tx = self.mvcc.as_ref().unwrap().new_txn(self.clone(), false);
+        let tx = self
+            .mvcc
+            .as_ref()
+            .unwrap()
+            .new_txn(self.clone(), self.options.serializable);
         tx.scan(lower, upper)
     }
 
